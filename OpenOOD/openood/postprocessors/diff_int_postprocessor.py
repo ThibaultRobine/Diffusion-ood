@@ -22,9 +22,9 @@ class MyDiffusionPostprocessor(BasePostprocessor):
         super().__init__(config)
         self.args = config.postprocessor.postprocessor_args
         
-        # Diffusion parameters
+        # Initialize with placeholder values
         self.diffusion_config = self._get_diffusion_config()
-        self.model, self.diffusion = None, None
+        self.data_shape = None  # Will be set in setup()
         
         # Reference point parameters
         self.kmeans_k = self.args.kmeans_k
@@ -35,20 +35,20 @@ class MyDiffusionPostprocessor(BasePostprocessor):
         self.n_quadrature_points = self.args.n_quadrature_points
         
         # Models and data
+        self.model, self.diffusion = None, None
         self.reference_points = None
         self.scaler = None
         self.kde = None
 
     def _get_diffusion_config(self):
-        """Create diffusion configuration from arguments"""
+        """Create diffusion configuration with dynamic image_size"""
         defaults = model_and_diffusion_defaults()
         return dict(
-            image_size=self.args.image_size,
+            # Placeholder values, will be updated in setup()
+            image_size=32,
             num_channels=self.args.num_channels,
             num_res_blocks=self.args.num_res_blocks,
             learn_sigma=self.args.learn_sigma,
-            class_cond=False,
-            use_checkpoint=False,
             attention_resolutions=self.args.attention_resolutions,
             num_heads=self.args.num_heads,
             num_heads_upsample=self.args.num_heads_upsample,
@@ -64,15 +64,22 @@ class MyDiffusionPostprocessor(BasePostprocessor):
         )
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
-        # Collect ID training data
+        # Collect ID training data and determine input shape
         id_train_loader = id_loader_dict['train']
         all_data = []
         for batch in tqdm(id_train_loader, desc='Collecting ID data'):
             data = batch['data'].to(device)
             all_data.append(data)
+            # Set data shape from first batch
+            if self.data_shape is None:
+                self.data_shape = data.shape[1:]
+                self._validate_data_shape()
+                # Update diffusion config with actual image size
+                self._update_image_size()
+
         self.train_data = torch.cat(all_data)
         
-        # Initialize diffusion model
+        # Initialize diffusion model with correct dimensions
         self._init_diffusion_model()
         
         # Train diffusion model
@@ -86,6 +93,33 @@ class MyDiffusionPostprocessor(BasePostprocessor):
         
         # Train KDE
         self.scaler, self.kde = self._train_kde(id_scores)
+
+    def _validate_data_shape(self):
+        """Ensure data shape is compatible with diffusion model"""
+        if len(self.data_shape) == 3:  # CHW format
+            channels, height, width = self.data_shape
+            if height != width:
+                raise ValueError(f"Non-square images ({height}x{width}) not supported")
+        elif len(self.data_shape) == 1:  # Flattened vector
+            pass  # No validation needed for 1D data
+        else:
+            raise ValueError(f"Unexpected data shape {self.data_shape}")
+
+    def _update_image_size(self):
+        """Extract image size from data shape"""
+        if len(self.data_shape) == 3:
+            # Standard image data (C, H, W)
+            self.diffusion_config['image_size'] = self.data_shape[1]
+        elif len(self.data_shape) == 1:
+            # Flattened data, use sqrt as approximation
+            dim = self.data_shape[0]
+            sqrt_dim = int(dim**0.5)
+            if sqrt_dim**2 == dim:
+                self.diffusion_config['image_size'] = sqrt_dim
+            else:
+                self.diffusion_config['image_size'] = dim
+        else:
+            raise ValueError(f"Unhandled data shape {self.data_shape}")
 
     def _init_diffusion_model(self):
         """Initialize Improved Diffusion model and diffusion process"""
@@ -143,6 +177,7 @@ class MyDiffusionPostprocessor(BasePostprocessor):
                             device=device)
         
         # Gradient-based optimization
+        x_init = x_init.view(-1, *self.data_shape)
         return self._optimize_reference_points(x_init)
 
     def _optimize_reference_points(self, x_init):
