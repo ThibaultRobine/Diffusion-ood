@@ -17,7 +17,7 @@ from improved_diffusion.script_util import (
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-class MyDiffusionPostprocessor(BasePostprocessor):
+class Diffintpostprocessor(BasePostprocessor):
     def __init__(self, config):
         super().__init__(config)
         self.args = config.postprocessor.postprocessor_args
